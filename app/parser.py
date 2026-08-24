@@ -75,8 +75,12 @@ def parse_timetable(path: str, llm_client: LLMClient | None = None) -> ParsedTim
                 time.sleep(5)
             started = time.monotonic()
             logger.info("parse_timetable: starting chunk %d/%d", i + 1, len(chunks))
+            # 4000 reliably truncated mid-JSON on a busy day (many cohort rows
+            # each carrying raw_label/row_label/cohort_id/... per entry) --
+            # confirmed live via a json_invalid "EOF while parsing" error at
+            # ~line 500 of the response.
             piece = llm.complete_json(
-                system_prompt, chunk, ParsedTimetable, config.MODEL_PARSE, max_tokens=4000
+                system_prompt, chunk, ParsedTimetable, config.MODEL_PARSE, max_tokens=12000
             )
             logger.info(
                 "parse_timetable: chunk %d/%d done in %.1fs (%d day(s))",
