@@ -11,7 +11,7 @@ from app import config
 
 T = TypeVar("T", bound=BaseModel)
 
-RATE_LIMIT_ATTEMPTS = 3
+RATE_LIMIT_ATTEMPTS = 5
 REQUEST_TIMEOUT = 60.0
 # Groq's current models spend part of this budget on hidden reasoning tokens
 # before the visible answer; too low a value yields an empty completion.
@@ -22,7 +22,7 @@ DEFAULT_MAX_TOKENS = 8000
 # docs/HANDOFF_V2.md, known issue #2). Past this cap we fail fast instead --
 # the caller gets a prompt 502 and can retry once the quota resets, rather
 # than the process blocking a worker for the full wait.
-MAX_RETRY_DELAY = 5.0
+MAX_RETRY_DELAY = 20.0
 
 
 class LLMError(RuntimeError):

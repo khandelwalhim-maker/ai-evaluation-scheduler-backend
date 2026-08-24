@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from app import config
@@ -64,7 +65,10 @@ def parse_timetable(path: str, llm_client: LLMClient | None = None) -> ParsedTim
         # Each chunk is a single day, so it needs far less completion budget
         # than the whole-week call did.
         combined = ParsedTimetable()
-        for chunk in _extract_grid_chunks(path):
+        chunks = _extract_grid_chunks(path)
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                time.sleep(5)
             piece = llm.complete_json(
                 system_prompt, chunk, ParsedTimetable, config.MODEL_PARSE, max_tokens=4000
             )
