@@ -15,6 +15,7 @@ from app import cache, config, engine, orchestrator, parser
 from app.llm import LLMClient, LLMError
 from app.schemas import CalendarState, CohortKind, CohortRegistry, ConfirmationQuestion, EntryKind
 from app.session import DEFAULT_SESSION_ID, STORE, SessionState
+from app.timetable_grid_parser import TimetableGridFormatError
 
 app = FastAPI(title="AI Evaluation Scheduler")
 router = APIRouter(prefix="/api")
@@ -173,7 +174,7 @@ async def upload_document(
                 "days_parsed": len(parsed.days),
                 "dates": sorted(day.date for day in parsed.days),
             }
-    except LLMError as exc:
+    except (LLMError, TimetableGridFormatError) as exc:
         logger.error("Document parsing failed (kind=%s, file=%s): %s", kind, file.filename, exc)
         raise HTTPException(status_code=502, detail=f"Document parsing failed: {exc}") from exc
     finally:

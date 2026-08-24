@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 
 from app import config
 from app.cache import cached_parse
 from app.llm import LLMClient
-from app.pdf_extract import extract_grid_chunks, extract_text_generic, ocr_fallback
+from app.pdf_extract import extract_text_generic, ocr_fallback
 from app.schemas import (
     CalendarState,
     CohortKind,
@@ -17,6 +16,7 @@ from app.schemas import (
     ParsedTimetable,
     TimetableEntry,
 )
+from app.timetable_grid_parser import parse_timetable_grid
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -37,14 +37,6 @@ def _extract_document_text(path: str) -> str:
     return text
 
 
-def _extract_grid_chunks(path: str) -> list[str]:
-    chunks = [c for c in extract_grid_chunks(path) if c.strip()]
-    if sum(len(c) for c in chunks) < _MIN_TEXT_CHARS:
-        ocr_text = ocr_fallback(path)
-        return [ocr_text] if ocr_text.strip() else chunks
-    return chunks
-
-
 def parse_course_outline(path: str, llm_client: LLMClient | None = None) -> CourseOutline:
     def compute() -> CourseOutline:
         llm = llm_client or LLMClient()
@@ -57,37 +49,10 @@ def parse_course_outline(path: str, llm_client: LLMClient | None = None) -> Cour
     return cached_parse(path, "outline", CourseOutline, compute)
 
 
-def parse_timetable(path: str, llm_client: LLMClient | None = None) -> ParsedTimetable:
+def parse_timetable(path: str) -> ParsedTimetable:
     def compute() -> ParsedTimetable:
-        llm = llm_client or LLMClient()
-        system_prompt = _load_prompt("extract_timetable.txt")
-
-        # One call per day-band (a full week in one call reliably exceeds this
-        # account's per-minute token budget once reasoning-token overhead is
-        # counted); chunks are split on blank table rows in pdf_extract.py.
-        # Each chunk is a single day, so it needs far less completion budget
-        # than the whole-week call did.
-        combined = ParsedTimetable()
-        chunks = _extract_grid_chunks(path)
-        logger.info("parse_timetable: %d chunk(s) to process", len(chunks))
-        for i, chunk in enumerate(chunks):
-            if i > 0:
-                time.sleep(5)
-            started = time.monotonic()
-            logger.info("parse_timetable: starting chunk %d/%d", i + 1, len(chunks))
-            # 4000 reliably truncated mid-JSON on a busy day (many cohort rows
-            # each carrying raw_label/row_label/cohort_id/... per entry) --
-            # confirmed live via a json_invalid "EOF while parsing" error at
-            # ~line 500 of the response.
-            piece = llm.complete_json(
-                system_prompt, chunk, ParsedTimetable, config.MODEL_PARSE, max_tokens=12000
-            )
-            logger.info(
-                "parse_timetable: chunk %d/%d done in %.1fs (%d day(s))",
-                i + 1, len(chunks), time.monotonic() - started, len(piece.days),
-            )
-            combined.days.extend(piece.days)
-
+        combined = parse_timetable_grid(path)
+        logger.info("parse_timetable: parsed %d day(s) from %s (deterministic)", len(combined.days), path)
         combined.questions = _confirmation_questions(combined)
         return combined
 

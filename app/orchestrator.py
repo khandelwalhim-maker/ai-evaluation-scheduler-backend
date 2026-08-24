@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from app import config, engine
+from app.calendar_summary import build_calendar_markdown
 from app.llm import LLMClient
 from app.schemas import (
     CalendarState,
@@ -143,6 +144,7 @@ def _build_context(session: SessionState) -> dict:
             "divisions": session.calendar.cohorts.divisions,
             "minors": session.calendar.cohorts.minors,
         },
+        "calendar_summary": build_calendar_markdown(session.calendar),
     }
 
 

@@ -13,6 +13,7 @@ from app.schemas import EvaluationType
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 OUTLINE_PATH = str(FIXTURES_DIR / "aba_course_outline.pdf")
 TIMETABLE_PATH = str(FIXTURES_DIR / "timetable_week13.pdf")
+TIMETABLE_PATH_2 = str(FIXTURES_DIR / "timetable_week14.pdf")
 
 requires_llm_key = pytest.mark.skipif(
     not os.environ.get("LLM_API_KEY"), reason="LLM_API_KEY not set"
@@ -30,6 +31,7 @@ def _clear_parse_cache():
 def _fixtures_exist():
     assert Path(OUTLINE_PATH).is_file(), f"missing fixture: {OUTLINE_PATH}"
     assert Path(TIMETABLE_PATH).is_file(), f"missing fixture: {TIMETABLE_PATH}"
+    assert Path(TIMETABLE_PATH_2).is_file(), f"missing fixture: {TIMETABLE_PATH_2}"
 
 
 def test_llm_client_requires_api_key(monkeypatch):
@@ -60,7 +62,6 @@ def test_parse_course_outline():
     assert len(endterms) == 1
 
 
-@requires_llm_key
 def test_parse_timetable():
     parsed = parse_timetable(TIMETABLE_PATH)
 
@@ -88,13 +89,20 @@ def test_parse_timetable():
         "pdfplumber table extraction); got banners on: " + repr(aba_banner_dates)
     )
 
-    double_session_entries = [
-        entry
-        for day in parsed.days
+    # Two adjacent time-slot cells (not one cell with two session numbers)
+    # is how the real timetable expresses a double slot for one course --
+    # e.g. "OSCSD HJ (13)" and "OSCSD HJ (14)" on 2026-08-24.
+    oscsd_sessions = sorted(
+        n
+        for day in parsed.days if day.date == "2026-08-24"
         for entry in day.entries
-        if len(entry.session_numbers) >= 2
-    ]
-    assert double_session_entries, "expected at least one entry with double sessions"
+        if entry.course_guess == "OSCSD"
+        for n in entry.session_numbers
+    )
+    assert oscsd_sessions.count(13) >= 1 and oscsd_sessions.count(14) >= 1, (
+        "expected separate OSCSD sessions 13 and 14 as adjacent time-slot entries "
+        "on 2026-08-24; got: " + repr(oscsd_sessions)
+    )
 
     assert parsed.questions, "expected a non-empty confirmation queue"
     identity_questions = [

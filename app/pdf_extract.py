@@ -62,19 +62,14 @@ def extract_grid(path: str) -> str:
     return _extract_grid_via_words(path)
 
 
-def extract_grid_chunks(path: str) -> list[str]:
-    """Split a spatial grid into row-bands separated by blank rows (for example,
-    one weekday per band), each serialized with the header row for column
-    context. Falls back to a single chunk when the table has no blank-row
-    structure or pdfplumber finds no table at all.
+def _split_body_into_bands(rows: list[list[str]]) -> tuple[list[str], list[list[list[str]]]]:
+    """Shared by extract_grid_chunks and extract_grid_bands. header = rows[0];
+    remaining rows are grouped into bands (for example, one per weekday),
+    split on rows that are entirely blank.
     """
-    rows = _pdfplumber_rows(path)
     if not rows:
-        text = _extract_grid_via_words(path)
-        return [text] if text.strip() else []
-
+        return [], []
     header, body = rows[0], rows[1:]
-    header_line = " | ".join(header)
 
     bands: list[list[list[str]]] = []
     current: list[list[str]] = []
@@ -87,13 +82,44 @@ def extract_grid_chunks(path: str) -> list[str]:
     if current:
         bands.append(current)
 
+    return header, bands
+
+
+def extract_grid_chunks(path: str) -> list[str]:
+    """Split a spatial grid into row-bands separated by blank rows (for example,
+    one weekday per band), each serialized with the header row for column
+    context. Falls back to a single chunk when the table has no blank-row
+    structure or pdfplumber finds no table at all.
+    """
+    rows = _pdfplumber_rows(path)
+    if not rows:
+        text = _extract_grid_via_words(path)
+        return [text] if text.strip() else []
+
+    header, bands = _split_body_into_bands(rows)
     if not bands:
         return [extract_grid(path)]
 
+    header_line = " | ".join(header)
     return [
         "\n".join([header_line] + [" | ".join(row) for row in band])
         for band in bands
     ]
+
+
+def extract_grid_bands(path: str) -> tuple[list[str], list[list[list[str]]]]:
+    """Raw-cell counterpart to extract_grid_chunks, for the deterministic
+    grid parser (app/timetable_grid_parser.py), which needs column-position
+    access rather than pre-joined text. Returns (header_cells, day_bands):
+    header_cells is the single header row; day_bands is one list-of-rows
+    per weekday band, each row a list of cell strings, in document order.
+    Returns ([], []) if pdfplumber finds no table -- there is no OCR/word-
+    clustering fallback here, so the caller treats that as a hard failure.
+    """
+    rows = _pdfplumber_rows(path)
+    if not rows:
+        return [], []
+    return _split_body_into_bands(rows)
 
 
 def ocr_fallback(path: str, dpi: int = 200) -> str:

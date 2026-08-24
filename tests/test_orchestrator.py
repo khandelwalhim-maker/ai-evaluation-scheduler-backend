@@ -47,7 +47,7 @@ session.
 from __future__ import annotations
 
 from app import engine
-from app.orchestrator import IntentFields, IntentResult, handle_message
+from app.orchestrator import IntentFields, IntentResult, _build_context, handle_message
 from app.schemas import (
     CalendarState,
     CohortKind,
@@ -121,6 +121,15 @@ def _base_state() -> CalendarState:
     state.dates[SATURDAY] = TimetableDay(date=SATURDAY)
     state.dates[SUNDAY] = TimetableDay(date=SUNDAY)
     return state
+
+
+def test_build_context_includes_calendar_summary():
+    session = SessionState(calendar=_base_state())
+    context = _build_context(session)
+
+    assert "calendar_summary" in context
+    assert isinstance(context["calendar_summary"], str)
+    assert context["calendar_summary"]
 
 
 def test_schedule_request_parks_on_missing_duration_then_completes():
