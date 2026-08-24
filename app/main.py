@@ -185,6 +185,38 @@ async def upload_document(
     }
 
 
+@router.delete("/course/{index}")
+def remove_course(index: int, session: SessionState = Depends(require_session)):
+    """Undoes a single wrong course-outline upload. Course outlines never
+    generate confirmation_queue entries (only timetable parsing does -- see
+    upload_document above, where new_questions is hardcoded empty for
+    kind == "course_outline"), so removing one has no other state to clean
+    up."""
+    courses = session.calendar.courses
+    if not (0 <= index < len(courses)):
+        raise HTTPException(status_code=404, detail=f"No course outline at index {index}")
+    removed = courses.pop(index)
+    session.bump()
+    return {"status": "removed", "removed": removed.model_dump(mode="json"), "state_version": session.state_version}
+
+
+@router.delete("/timetable")
+def clear_timetable(session: SessionState = Depends(require_session)):
+    """Undoes a wrong timetable upload. Timetable entries merge by (date,
+    cohort, label) with no per-upload provenance kept (see
+    parser.merge_timetables), so there is no way to undo just one upload
+    once merged -- this clears all parsed timetable data so the user can
+    re-upload cleanly. Also drops confirmation_queue, since every
+    confirmation question originates from timetable parsing and would
+    otherwise dangle, referencing entries that no longer exist."""
+    session.calendar.dates = {}
+    session.calendar.cohorts = CohortRegistry()
+    session.calendar.questions = []
+    session.confirmation_queue = []
+    session.bump()
+    return {"status": "cleared", "state_version": session.state_version}
+
+
 @router.post("/confirm")
 def confirm(payload: ConfirmRequest, session: SessionState = Depends(require_session)):
     message = orchestrator.resolve_confirmation(session, payload.context, payload.resolution)
