@@ -143,11 +143,19 @@ class LLMClient:
         try:
             raw = self._chat(system_prompt, schema_hint, model, json_mode=True, max_tokens=max_tokens)
         except LLMError:
-            if model == config.MODEL_FALLBACK:
-                raise
-            return self._complete_json_with_model(
-                system_prompt, user_content, schema_model, config.MODEL_FALLBACK, max_tokens
-            )
+            # Retry the same model once before escalating -- Groq occasionally
+            # 400s with an empty completion under json_mode (json_validate_failed)
+            # on an otherwise-fine request, and simply asking again often
+            # succeeds. Mirrors the same-model retry already done below for a
+            # response that came back but failed schema validation.
+            try:
+                raw = self._chat(system_prompt, schema_hint, model, json_mode=True, max_tokens=max_tokens)
+            except LLMError:
+                if model == config.MODEL_FALLBACK:
+                    raise
+                return self._complete_json_with_model(
+                    system_prompt, user_content, schema_model, config.MODEL_FALLBACK, max_tokens
+                )
 
         try:
             return schema_model.model_validate_json(raw)

@@ -10,7 +10,14 @@ logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODEL_PARSE = os.getenv("MODEL_PARSE", "openai/gpt-oss-120b")
 MODEL_NARRATE = os.getenv("MODEL_NARRATE", "openai/gpt-oss-20b")
-MODEL_FALLBACK = os.getenv("MODEL_FALLBACK", "openai/gpt-oss-120b")
+# llm.py's fallback-escalation logic (_chat/_complete_json_with_model) skips
+# straight to re-raising instead of retrying whenever `model == MODEL_FALLBACK`
+# already, so this must default to something other than MODEL_PARSE or the
+# "retry against a fallback on failure" safety net silently never fires --
+# confirmed live: Groq occasionally returns a 400 json_validate_failed with
+# an empty completion under json_mode, and with MODEL_FALLBACK equal to
+# MODEL_PARSE that surfaced straight to the user with zero retries.
+MODEL_FALLBACK = os.getenv("MODEL_FALLBACK", "openai/gpt-oss-20b")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 TIMEZONE_NOTE = "All datetimes are timezone-naive Indian Standard Time by convention"
 
