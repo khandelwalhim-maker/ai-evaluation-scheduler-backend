@@ -5,7 +5,7 @@
 # first failure so it is safe to gate a deploy on.
 #
 # This is not a mocked test: it spends real LLM tokens against a real
-# GROQ_API_KEY (parse results are cached by SHA-256 under the server's
+# LLM_API_KEY (parse results are cached by SHA-256 under the server's
 # parse-cache directory, so re-running it against the same fixtures does
 # not re-spend on the parts that hit cache).
 #
@@ -92,9 +92,9 @@ expect_status "$status" 200 "health"
 step "GET /api/selfcheck"
 status=$(request GET /api/selfcheck)
 expect_status "$status" 200 "selfcheck"
-key_present=$(jget "$WORKDIR/last.json" "data['groq_api_key']['present']")
-[ "$key_present" = "True" ] || fail "selfcheck: GROQ_API_KEY not set on the server -- export it before running smoke.sh"
-echo "    GROQ_API_KEY present"
+key_present=$(jget "$WORKDIR/last.json" "data['llm_api_key']['present']")
+[ "$key_present" = "True" ] || fail "selfcheck: LLM_API_KEY not set on the server -- export it before running smoke.sh"
+echo "    LLM_API_KEY present"
 
 step "POST /api/state/restore (bootstrap session $SESSION_ID)"
 status=$(request POST /api/state/restore -H "Content-Type: application/json" -d '{}')

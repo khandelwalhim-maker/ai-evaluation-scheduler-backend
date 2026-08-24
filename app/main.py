@@ -99,7 +99,7 @@ def selfcheck() -> dict:
     one failing never prevents the others from reporting. This service no
     longer serves a frontend bundle (see ai-evaluation-scheduler-frontend),
     so there is no static-bundle check here."""
-    groq_api_key = {"present": bool(config.GROQ_API_KEY)}
+    llm_api_key = {"present": bool(config.LLM_API_KEY)}
 
     try:
         cache.CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -110,8 +110,8 @@ def selfcheck() -> dict:
     except OSError as exc:
         parse_cache = {"writable": False, "path": str(cache.CACHE_DIR), "error": str(exc)}
 
-    if not config.GROQ_API_KEY:
-        llm_ping = {"status": "skipped", "reason": "GROQ_API_KEY is not set"}
+    if not config.LLM_API_KEY:
+        llm_ping = {"status": "skipped", "reason": "LLM_API_KEY is not set"}
     else:
         try:
             client = LLMClient()
@@ -123,7 +123,7 @@ def selfcheck() -> dict:
     ok = parse_cache["writable"] and llm_ping["status"] != "error"
     return {
         "status": "ok" if ok else "degraded",
-        "groq_api_key": groq_api_key,
+        "llm_api_key": llm_api_key,
         "parse_cache": parse_cache,
         "llm_ping": llm_ping,
     }

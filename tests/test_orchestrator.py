@@ -1,9 +1,9 @@
 """Phase 3 orchestrator tests. The LLM is mocked throughout via a FakeLLM
-stub passed as `llm_client`, so these run with no GROQ_API_KEY and make no
+stub passed as `llm_client`, so these run with no LLM_API_KEY and make no
 network calls.
 
-Manual end-to-end curl sequence (needs a real GROQ_API_KEY and a running
-server: `GROQ_API_KEY=... ./.venv/Scripts/python -m uvicorn app.main:app
+Manual end-to-end curl sequence (needs a real LLM_API_KEY and a running
+server: `LLM_API_KEY=... ./.venv/Scripts/python -m uvicorn app.main:app
 --reload`, run from the repo root, with paths below also relative to it):
 
     # 1. Upload the course outline (defines ABA's evaluations)

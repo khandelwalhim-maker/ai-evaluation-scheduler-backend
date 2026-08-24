@@ -59,9 +59,9 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 
 class LLMClient:
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        resolved_key = api_key or config.GROQ_API_KEY
+        resolved_key = api_key or config.LLM_API_KEY
         if not resolved_key:
-            raise LLMError("GROQ_API_KEY is not configured; cannot create an LLMClient")
+            raise LLMError("LLM_API_KEY is not configured; cannot create an LLMClient")
         self._api_key = resolved_key
         self._base_url = (base_url or config.LLM_BASE_URL).rstrip("/")
 

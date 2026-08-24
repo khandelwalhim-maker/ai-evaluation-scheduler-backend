@@ -14,8 +14,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 OUTLINE_PATH = str(FIXTURES_DIR / "aba_course_outline.pdf")
 TIMETABLE_PATH = str(FIXTURES_DIR / "timetable_week13.pdf")
 
-requires_groq_key = pytest.mark.skipif(
-    not os.environ.get("GROQ_API_KEY"), reason="GROQ_API_KEY not set"
+requires_llm_key = pytest.mark.skipif(
+    not os.environ.get("LLM_API_KEY"), reason="LLM_API_KEY not set"
 )
 
 
@@ -33,12 +33,12 @@ def _fixtures_exist():
 
 
 def test_llm_client_requires_api_key(monkeypatch):
-    monkeypatch.setattr(config, "GROQ_API_KEY", None)
+    monkeypatch.setattr(config, "LLM_API_KEY", None)
     with pytest.raises(LLMError):
         LLMClient(api_key=None)
 
 
-@requires_groq_key
+@requires_llm_key
 def test_parse_course_outline():
     outline = parse_course_outline(OUTLINE_PATH)
 
@@ -60,7 +60,7 @@ def test_parse_course_outline():
     assert len(endterms) == 1
 
 
-@requires_groq_key
+@requires_llm_key
 def test_parse_timetable():
     parsed = parse_timetable(TIMETABLE_PATH)
 
@@ -109,7 +109,7 @@ def test_parse_timetable():
     )
 
 
-@requires_groq_key
+@requires_llm_key
 def test_parse_course_outline_uses_cache(monkeypatch):
     calls = {"n": 0}
     original = LLMClient.complete_json
