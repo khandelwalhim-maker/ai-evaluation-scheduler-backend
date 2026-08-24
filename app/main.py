@@ -1,7 +1,10 @@
+import logging
 import os
 import tempfile
 from datetime import date as _date, timedelta
 from typing import Optional
+
+logger = logging.getLogger("uvicorn.error")
 
 from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -171,6 +174,7 @@ async def upload_document(
                 "dates": sorted(day.date for day in parsed.days),
             }
     except LLMError as exc:
+        logger.error("Document parsing failed (kind=%s, file=%s): %s", kind, file.filename, exc)
         raise HTTPException(status_code=502, detail=f"Document parsing failed: {exc}") from exc
     finally:
         os.unlink(tmp_path)

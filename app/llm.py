@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Type, TypeVar
 
@@ -8,6 +9,8 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app import config
+
+logger = logging.getLogger("uvicorn.error")
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -90,12 +93,21 @@ class LLMClient:
         for attempt in range(RATE_LIMIT_ATTEMPTS):
             response = httpx.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
             if _is_rate_limited(response):
+                delay = _retry_delay(response, attempt)
+                logger.warning(
+                    "LLM rate limited (model=%s, attempt %d/%d): %s -- sleeping %.1fs",
+                    model, attempt + 1, RATE_LIMIT_ATTEMPTS, response.text[:300], delay,
+                )
                 last_exc = LLMError(f"rate limited (attempt {attempt + 1}): {response.text}")
                 if attempt == RATE_LIMIT_ATTEMPTS - 1:
                     break
-                time.sleep(_retry_delay(response, attempt))
+                time.sleep(delay)
                 continue
             if response.status_code >= 400:
+                logger.error(
+                    "LLM request failed (model=%s): %d %s",
+                    model, response.status_code, response.text[:500],
+                )
                 raise LLMError(f"LLM request failed with {response.status_code}: {response.text}")
             data = response.json()
             return data["choices"][0]["message"]["content"] or ""

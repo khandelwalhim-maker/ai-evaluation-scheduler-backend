@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from app.schemas import (
     ParsedTimetable,
     TimetableEntry,
 )
+
+logger = logging.getLogger("uvicorn.error")
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _MIN_TEXT_CHARS = 100
@@ -66,11 +69,18 @@ def parse_timetable(path: str, llm_client: LLMClient | None = None) -> ParsedTim
         # than the whole-week call did.
         combined = ParsedTimetable()
         chunks = _extract_grid_chunks(path)
+        logger.info("parse_timetable: %d chunk(s) to process", len(chunks))
         for i, chunk in enumerate(chunks):
             if i > 0:
                 time.sleep(5)
+            started = time.monotonic()
+            logger.info("parse_timetable: starting chunk %d/%d", i + 1, len(chunks))
             piece = llm.complete_json(
                 system_prompt, chunk, ParsedTimetable, config.MODEL_PARSE, max_tokens=4000
+            )
+            logger.info(
+                "parse_timetable: chunk %d/%d done in %.1fs (%d day(s))",
+                i + 1, len(chunks), time.monotonic() - started, len(piece.days),
             )
             combined.days.extend(piece.days)
 
