@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+python-multipart
+pymupdf
+pdfplumber
+pytesseract
+pillow
+groq
+httpx
+pytest
