@@ -8,8 +8,8 @@ date itself. See `docs/SPEC.md` for the full domain specification and
 `docs/HANDOFF_V2.md` for architecture and design-decision notes.
 
 This service is a pure JSON API. The frontend
-([ai-evaluation-scheduler-frontend](https://github.com/)) is a separate
-deployment that calls it cross-origin.
+([ai-evaluation-scheduler-frontend](https://github.com/khandelwalhim-maker/ai-evaluation-scheduler-frontend))
+is a separate deployment that calls it cross-origin.
 
 ## Running locally
 
