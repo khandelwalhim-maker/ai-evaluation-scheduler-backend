@@ -6,6 +6,7 @@ pymupdf
 pdfplumber
 pytesseract
 pillow
+openpyxl
 groq
 httpx
 pytest

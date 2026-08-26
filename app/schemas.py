@@ -173,3 +173,7 @@ class CalendarState(BaseModel):
     cohorts: CohortRegistry = Field(default_factory=CohortRegistry)
     courses: list[CourseOutline] = Field(default_factory=list)
     questions: list[ConfirmationQuestion] = Field(default_factory=list)
+    # User-supplied ABBR -> canonical course name mapping, uploaded via a
+    # downloadable CSV/XLSX template. Consulted by parser._confirmation_questions
+    # to resolve timetable course_guess codes without a manual confirmation.
+    course_registry: dict[str, str] = Field(default_factory=dict)

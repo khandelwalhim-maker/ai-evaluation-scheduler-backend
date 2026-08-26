@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app import config, engine
+from app import admin_settings, config, engine
 from app.calendar_summary import build_calendar_markdown
 from app.llm import LLMClient
 from app.schemas import (
@@ -42,7 +42,9 @@ _AFTER_SESSION_RE = re.compile(r"after\s+session\s+(\d+)", re.IGNORECASE)
 
 
 def _load_prompt(name: str) -> str:
-    return (_PROMPTS_DIR / name).read_text(encoding="utf-8").strip()
+    base = (_PROMPTS_DIR / name).read_text(encoding="utf-8").strip()
+    extra = admin_settings.EXTRA_INSTRUCTIONS.get(name.removesuffix(".txt"), "")
+    return f"{base}\n\n{extra}" if extra else base
 
 
 # --- intent classification schema -------------------------------------------------

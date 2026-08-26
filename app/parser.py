@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from app import config
+from app import admin_settings, config
 from app.cache import cached_parse
 from app.llm import LLMClient
 from app.pdf_extract import extract_text_generic, ocr_fallback
@@ -27,7 +27,9 @@ RECURRENCE_THRESHOLD = 3
 
 
 def _load_prompt(name: str) -> str:
-    return (_PROMPTS_DIR / name).read_text(encoding="utf-8").strip()
+    base = (_PROMPTS_DIR / name).read_text(encoding="utf-8").strip()
+    extra = admin_settings.EXTRA_INSTRUCTIONS.get(name.removesuffix(".txt"), "")
+    return f"{base}\n\n{extra}" if extra else base
 
 
 def _extract_document_text(path: str) -> str:
@@ -49,17 +51,28 @@ def parse_course_outline(path: str, llm_client: LLMClient | None = None) -> Cour
     return cached_parse(path, "outline", CourseOutline, compute)
 
 
-def parse_timetable(path: str) -> ParsedTimetable:
+def parse_timetable(path: str, course_registry: dict[str, str] | None = None) -> ParsedTimetable:
     def compute() -> ParsedTimetable:
         combined = parse_timetable_grid(path)
         logger.info("parse_timetable: parsed %d day(s) from %s (deterministic)", len(combined.days), path)
-        combined.questions = _confirmation_questions(combined)
         return combined
 
-    return cached_parse(path, "timetable", ParsedTimetable, compute)
+    # Registry resolution + confirmation-question generation run fresh on
+    # every call, outside cached_parse's boundary. cached_parse keys purely
+    # on file hash + kind, with no awareness of the registry -- resolving
+    # inside compute() would mean re-uploading the same PDF after the
+    # registry changes silently returns a stale, pre-registry result.
+    parsed = cached_parse(path, "timetable", ParsedTimetable, compute)
+    parsed.questions = _confirmation_questions(parsed, course_registry)
+    return parsed
 
 
-def _confirmation_questions(parsed: ParsedTimetable) -> list[ConfirmationQuestion]:
+def _confirmation_questions(
+    parsed: ParsedTimetable, course_registry: dict[str, str] | None = None
+) -> list[ConfirmationQuestion]:
+    registry = {k.upper(): v for k, v in (course_registry or {}).items()}
+    registry_names = set(registry.values())
+
     questions: list[ConfirmationQuestion] = []
     seen: set[tuple[str, str]] = set()
 
@@ -74,9 +87,19 @@ def _confirmation_questions(parsed: ParsedTimetable) -> list[ConfirmationQuestio
 
     for day in parsed.days:
         for entry in day.entries:
+            raw_code = (entry.course_guess or "").upper()
+            known = raw_code in registry
+            if known:
+                # A user-supplied registry is a stronger identity signal
+                # than the grid parser's per-cell confidence heuristic
+                # (tuned for session-number ambiguity, not identity), so it
+                # resolves course_guess and suppresses the identity
+                # question below even when confidence is otherwise low.
+                entry.course_guess = registry[raw_code]
+
             label = entry.course_guess or entry.raw_label
 
-            if entry.confidence < CONFIDENCE_THRESHOLD:
+            if entry.confidence < CONFIDENCE_THRESHOLD and not known:
                 add(
                     "identity",
                     f"Timetable code '{label}' was extracted with low confidence "
@@ -112,7 +135,7 @@ def _confirmation_questions(parsed: ParsedTimetable) -> list[ConfirmationQuestio
     # even when each day's chunk individually looked confident, since a
     # per-day extraction never sees the cross-week recurrence pattern.
     for code, dates in code_days.items():
-        if len(dates) >= RECURRENCE_THRESHOLD:
+        if len(dates) >= RECURRENCE_THRESHOLD and code not in registry_names:
             add(
                 "identity",
                 f"Timetable code '{code}' recurs across {len(dates)} different days "

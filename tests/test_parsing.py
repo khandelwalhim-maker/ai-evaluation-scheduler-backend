@@ -117,6 +117,48 @@ def test_parse_timetable():
     )
 
 
+def test_parse_timetable_with_registry_resolves_identity_questions():
+    # Same real fixture as test_parse_timetable, which documents that it
+    # produces low-confidence/recurring EAB/ABA identity questions with no
+    # registry. Supplying a registry should resolve both codes and remove
+    # every question that references them, without touching cohort/tbc
+    # questions (which are independent checks).
+    registry = {"EAB": "Economic Analysis for Business", "ABA": "Applied Business Analytics"}
+    parsed = parse_timetable(TIMETABLE_PATH, registry)
+
+    leftover_identity_mentions = [
+        q
+        for q in parsed.questions
+        if "eab" in q.question.lower() or "aba" in q.question.lower()
+        or "eab" in (q.context or "").lower() or "aba" in (q.context or "").lower()
+    ]
+    assert not leftover_identity_mentions, (
+        "registry should have resolved every EAB/ABA identity question; still present: "
+        + repr([q.question for q in leftover_identity_mentions])
+    )
+
+    resolved_names = {
+        entry.course_guess
+        for day in parsed.days
+        for entry in day.entries
+        if entry.course_guess in registry.values()
+    }
+    assert resolved_names == set(registry.values()), (
+        "expected timetable entries' course_guess to be rewritten to the registry's canonical "
+        "names; got: " + repr(resolved_names)
+    )
+
+
+def test_parse_timetable_registry_does_not_suppress_unrelated_questions():
+    # A registry entry for an unrelated code must not accidentally suppress
+    # cohort/tbc questions, which are independent of identity resolution.
+    baseline = parse_timetable(TIMETABLE_PATH)
+    with_unrelated_registry = parse_timetable(TIMETABLE_PATH, {"ZZZ": "Not A Real Course"})
+
+    non_identity = lambda qs: [q for q in qs if q.kind != "identity"]
+    assert len(non_identity(with_unrelated_registry.questions)) == len(non_identity(baseline.questions))
+
+
 @requires_llm_key
 def test_parse_course_outline_uses_cache(monkeypatch):
     calls = {"n": 0}

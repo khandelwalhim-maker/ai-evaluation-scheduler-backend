@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import secrets
 import tempfile
 from datetime import date as _date, timedelta
 from typing import Optional
@@ -8,10 +10,11 @@ logger = logging.getLogger("uvicorn.error")
 
 from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
-from app import cache, config, engine, orchestrator, parser
+from app import admin_settings, cache, config, course_registry, engine, orchestrator, parser
+from app.course_registry import CourseRegistryFormatError
 from app.llm import LLMClient, LLMError
 from app.schemas import CalendarState, CohortKind, CohortRegistry, ConfirmationQuestion, EntryKind
 from app.session import DEFAULT_SESSION_ID, STORE, SessionState
@@ -50,6 +53,45 @@ def require_session(session_id: str = Depends(get_session_id)) -> SessionState:
     if session is None:
         raise HTTPException(status_code=404, detail=f"Unknown session '{session_id}'")
     return session
+
+
+def require_admin(x_admin_token: str = Header(default="")) -> None:
+    """Gates every /api/admin/* route. Fails closed: if the operator never
+    set ADMIN_TOKEN, admin routes are disabled entirely (503), not open to
+    anyone who guesses an empty/default credential. A wrong-but-present
+    token is a distinct 401 -- the frontend needs to tell "not configured
+    on the server" apart from "you typed the wrong value," since they call
+    for different operator actions."""
+    if not config.ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Developer Options is not configured on the server")
+    if not secrets.compare_digest(x_admin_token, config.ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid developer access token")
+
+
+_STATUS_RE = re.compile(r"failed with (\d+)")
+
+
+def _classify_llm_error(exc: Exception) -> str:
+    """Classifies a probe failure into a status safe to show a client,
+    without ever forwarding the upstream provider's raw response text --
+    see the hardening note on the three sites below for why that matters.
+    Defensive on two axes, not just the happy path: LLMError message
+    shapes other than llm.py's "failed with {status}" (e.g. rate-limit
+    exhaustion, schema-validation-failed messages), and non-LLMError
+    exceptions entirely (a network-level failure from httpx.post, which
+    llm.py's _chat() doesn't wrap in its own try/except) both fall back to
+    "other_error" instead of propagating or misparsing."""
+    if not isinstance(exc, LLMError):
+        return "other_error"
+    match = _STATUS_RE.search(str(exc))
+    if not match:
+        return "other_error"
+    status = int(match.group(1))
+    if status in (401, 403):
+        return "auth_error"
+    if status == 429:
+        return "rate_limited"
+    return "other_error"
 
 
 class ChatRequest(BaseModel):
@@ -119,7 +161,13 @@ def selfcheck() -> dict:
             client.complete_text("Reply with one word.", "ping", config.MODEL_PARSE, max_tokens=1)
             llm_ping = {"status": "ok", "model": config.MODEL_PARSE}
         except LLMError as exc:
-            llm_ping = {"status": "error", "model": config.MODEL_PARSE, "detail": str(exc)}
+            # Never forward the raw upstream response text here -- this
+            # route has no auth, so it's the most exposed of the three
+            # sites carrying this exact risk (see require_admin's sibling
+            # /admin/settings/test for the fuller explanation). The full
+            # exception (llm.py already truncates it) still reaches the
+            # operator via logger.error at the LLMError raise site itself.
+            llm_ping = {"status": "error", "model": config.MODEL_PARSE, "detail": "error contacting provider"}
 
     ok = parse_cache["writable"] and llm_ping["status"] != "error"
     return {
@@ -128,6 +176,127 @@ def selfcheck() -> dict:
         "parse_cache": parse_cache,
         "llm_ping": llm_ping,
     }
+
+
+class AdminSettingsUpdate(BaseModel):
+    # Every field optional and omit-to-leave-unchanged. llm_api_key is
+    # write-only by design: there is no way to read it back in full, only
+    # masked (see get_admin_settings), matching how it could previously
+    # only ever be set via an env var. A blank/omitted value never clears
+    # llm_api_key/llm_base_url/model_* (those must never legitimately be
+    # blank -- LLMClient would break), but a blank string *does* clear an
+    # extra_*_instructions field back to just the base prompt, since blank
+    # is a meaningful value there.
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    model_parse: Optional[str] = None
+    model_narrate: Optional[str] = None
+    model_fallback: Optional[str] = None
+    extra_intent_instructions: Optional[str] = None
+    extra_narrate_instructions: Optional[str] = None
+    extra_outline_instructions: Optional[str] = None
+
+
+def _mask_key(key: Optional[str]) -> Optional[str]:
+    if not key:
+        return None
+    if len(key) <= 4:
+        return "*" * len(key)
+    return "*" * (len(key) - 4) + key[-4:]
+
+
+@router.get("/admin/settings")
+def get_admin_settings(_: None = Depends(require_admin)) -> dict:
+    return {
+        "llm_api_key_masked": _mask_key(config.LLM_API_KEY),
+        "llm_base_url": config.LLM_BASE_URL,
+        "model_parse": config.MODEL_PARSE,
+        "model_narrate": config.MODEL_NARRATE,
+        "model_fallback": config.MODEL_FALLBACK,
+        "extra_intent_instructions": admin_settings.EXTRA_INSTRUCTIONS["intent"],
+        "extra_narrate_instructions": admin_settings.EXTRA_INSTRUCTIONS["narrate"],
+        "extra_outline_instructions": admin_settings.EXTRA_INSTRUCTIONS["extract_outline"],
+    }
+
+
+@router.post("/admin/settings")
+def update_admin_settings(payload: AdminSettingsUpdate, _: None = Depends(require_admin)) -> dict:
+    # Mutates app.config's attributes directly (read via live `config.X`
+    # access everywhere -- llm.py, orchestrator.py, parser.py -- never
+    # `from app.config import X`), so every call site picks this up
+    # immediately with no restart, the same way orchestrator.py's
+    # adjust_rule already mutates engine.py's constants at runtime.
+    # In-memory only: resets to the Railway env vars on the next deploy.
+    changed: list[str] = []
+
+    if payload.llm_api_key:
+        config.LLM_API_KEY = payload.llm_api_key
+        changed.append("llm_api_key")
+    if payload.llm_base_url:
+        config.LLM_BASE_URL = payload.llm_base_url
+        changed.append("llm_base_url")
+    if payload.model_parse:
+        config.MODEL_PARSE = payload.model_parse
+        changed.append("model_parse")
+    if payload.model_narrate:
+        config.MODEL_NARRATE = payload.model_narrate
+        changed.append("model_narrate")
+    if payload.model_fallback:
+        config.MODEL_FALLBACK = payload.model_fallback
+        changed.append("model_fallback")
+    if payload.extra_intent_instructions is not None:
+        admin_settings.EXTRA_INSTRUCTIONS["intent"] = payload.extra_intent_instructions
+        changed.append("extra_intent_instructions")
+    if payload.extra_narrate_instructions is not None:
+        admin_settings.EXTRA_INSTRUCTIONS["narrate"] = payload.extra_narrate_instructions
+        changed.append("extra_narrate_instructions")
+    if payload.extra_outline_instructions is not None:
+        admin_settings.EXTRA_INSTRUCTIONS["extract_outline"] = payload.extra_outline_instructions
+        changed.append("extra_outline_instructions")
+
+    logger.info("Developer Options: admin settings updated: %s", changed)  # names only, never values
+    return {"status": "updated", "changed": changed}
+
+
+@router.post("/admin/settings/test")
+def test_admin_settings(_: None = Depends(require_admin)) -> dict:
+    """Runs the same probe /selfcheck does, against whatever config is
+    currently active, so a just-saved key/model can be verified immediately.
+    Deliberately broad except: classifies auth/rate-limit/network/any other
+    failure into a status without ever forwarding the upstream provider's
+    raw response text back to the browser -- see _classify_llm_error."""
+    try:
+        client = LLMClient()
+        client.complete_text("Reply with one word.", "ping", config.MODEL_PARSE, max_tokens=1)
+        return {"status": "ok", "model": config.MODEL_PARSE}
+    except Exception as exc:
+        logger.exception("Developer Options: settings test probe failed")
+        return {"status": _classify_llm_error(exc), "model": config.MODEL_PARSE}
+
+
+MIN_ADMIN_TOKEN_LENGTH = 8
+
+
+class AdminTokenRotate(BaseModel):
+    new_token: str
+
+
+@router.post("/admin/token")
+def rotate_admin_token(payload: AdminTokenRotate, _: None = Depends(require_admin)) -> dict:
+    """Lets an already-authenticated operator change the developer access
+    token without touching Railway -- requires knowing the current token
+    (require_admin), never the reverse. Same in-memory-only caveat as every
+    other Developer Options setting: this takes effect immediately, but a
+    Railway redeploy reverts to whatever ADMIN_TOKEN is set to there, so a
+    permanent change still needs the env var updated too."""
+    new_token = payload.new_token.strip()
+    if len(new_token) < MIN_ADMIN_TOKEN_LENGTH:
+        raise HTTPException(
+            status_code=400, detail=f"Token must be at least {MIN_ADMIN_TOKEN_LENGTH} characters"
+        )
+    config.ADMIN_TOKEN = new_token
+    logger.info("Developer Options: admin access token was rotated")  # never logs the value
+    return {"status": "updated"}
 
 
 @router.post("/upload")
@@ -165,7 +334,7 @@ async def upload_document(
             new_questions: list[ConfirmationQuestion] = []
             summary = {"kind": kind, "course": outline.model_dump(mode="json")}
         else:
-            parsed = parser.parse_timetable(tmp_path)
+            parsed = parser.parse_timetable(tmp_path, session.calendar.course_registry)
             parser.merge_timetables(session.calendar, parsed)
             _sync_cohort_registry(session.calendar)
             new_questions = parsed.questions
@@ -175,8 +344,12 @@ async def upload_document(
                 "dates": sorted(day.date for day in parsed.days),
             }
     except (LLMError, TimetableGridFormatError) as exc:
+        # detail is intentionally static, not f"...: {exc}" -- an LLMError's
+        # message can carry the full raw upstream provider response body
+        # (see llm.py's _chat()), and this response reaches the browser.
+        # The full exception is still logged here for the operator.
         logger.error("Document parsing failed (kind=%s, file=%s): %s", kind, file.filename, exc)
-        raise HTTPException(status_code=502, detail=f"Document parsing failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Document parsing failed -- check server logs for details.") from exc
     finally:
         os.unlink(tmp_path)
 
@@ -222,6 +395,90 @@ def clear_timetable(session: SessionState = Depends(require_session)):
     return {"status": "cleared", "state_version": session.state_version}
 
 
+@router.post("/course-registry")
+async def upload_course_registry(
+    file: UploadFile = File(...),
+    session: SessionState = Depends(require_session),
+):
+    body = await file.read()
+    try:
+        new_registry, collapsed_keys = course_registry.parse_registry_upload(body, file.filename or "")
+    except CourseRegistryFormatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Upsert, last-write-wins: a re-upload that corrects an existing
+    # abbreviation is expected to take effect, not be ignored.
+    session.calendar.course_registry.update(new_registry)
+    session.bump()
+
+    summary: dict = {"added_or_updated": len(new_registry)}
+    if collapsed_keys:
+        summary["rows_collapsed"] = collapsed_keys
+    return {"summary": summary, "state_version": session.state_version}
+
+
+@router.get("/course-registry/template")
+def download_course_registry_template(format: str = "csv", session: SessionState = Depends(require_session)):
+    if format not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'xlsx'")
+
+    unresolved = {
+        entry.course_guess.upper()
+        for day in session.calendar.dates.values()
+        for entry in day.entries
+        if entry.course_guess and course_registry.is_unresolved_code(entry.course_guess)
+    }
+    known_names = [c.name for c in session.calendar.courses]
+
+    content, filename, media_type = course_registry.build_registry_template(
+        sorted(unresolved), known_names, format  # type: ignore[arg-type]
+    )
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.delete("/course-registry")
+def clear_course_registry(session: SessionState = Depends(require_session)):
+    session.calendar.course_registry = {}
+    session.bump()
+    return {"status": "cleared", "state_version": session.state_version}
+
+
+class RegistryEntryUpsert(BaseModel):
+    course_name: str
+
+
+@router.put("/course-registry/{abbreviation}")
+def upsert_course_registry_entry(
+    abbreviation: str, payload: RegistryEntryUpsert, session: SessionState = Depends(require_session)
+):
+    """Adds or edits exactly one abbreviation -> name mapping, so fixing a
+    typo or registering one new code doesn't require the full CSV/XLSX
+    download-edit-upload round trip the bulk endpoint above needs."""
+    name = payload.course_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="course_name must not be blank")
+    key = course_registry.normalize_abbreviation(abbreviation)
+    if not key:
+        raise HTTPException(status_code=400, detail="abbreviation must not be blank")
+    session.calendar.course_registry[key] = name
+    session.bump()
+    return {"status": "updated", "abbreviation": key, "state_version": session.state_version}
+
+
+@router.delete("/course-registry/{abbreviation}")
+def remove_course_registry_entry(abbreviation: str, session: SessionState = Depends(require_session)):
+    key = course_registry.normalize_abbreviation(abbreviation)
+    if key not in session.calendar.course_registry:
+        raise HTTPException(status_code=404, detail=f"No registry entry for '{key}'")
+    del session.calendar.course_registry[key]
+    session.bump()
+    return {"status": "removed", "abbreviation": key, "state_version": session.state_version}
+
+
 @router.post("/confirm")
 def confirm(payload: ConfirmRequest, session: SessionState = Depends(require_session)):
     message = orchestrator.resolve_confirmation(session, payload.context, payload.resolution)
@@ -237,7 +494,10 @@ def chat(payload: ChatRequest, session: SessionState = Depends(require_session))
     try:
         result = orchestrator.handle_message(session, payload.message)
     except LLMError as exc:
-        raise HTTPException(status_code=502, detail=f"Assistant is unavailable: {exc}") from exc
+        # Static detail, same reasoning as the upload handler above: an
+        # LLMError's message can carry the raw upstream response body.
+        logger.error("Chat handling failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Assistant is unavailable -- check server logs for details.") from exc
     return {**result.model_dump(mode="json"), "state_version": session.state_version}
 
 
