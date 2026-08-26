@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import secrets
 import tempfile
 from datetime import date as _date, timedelta
 from typing import Optional
@@ -53,19 +52,6 @@ def require_session(session_id: str = Depends(get_session_id)) -> SessionState:
     if session is None:
         raise HTTPException(status_code=404, detail=f"Unknown session '{session_id}'")
     return session
-
-
-def require_admin(x_admin_token: str = Header(default="")) -> None:
-    """Gates every /api/admin/* route. Fails closed: if the operator never
-    set ADMIN_TOKEN, admin routes are disabled entirely (503), not open to
-    anyone who guesses an empty/default credential. A wrong-but-present
-    token is a distinct 401 -- the frontend needs to tell "not configured
-    on the server" apart from "you typed the wrong value," since they call
-    for different operator actions."""
-    if not config.ADMIN_TOKEN:
-        raise HTTPException(status_code=503, detail="Developer Options is not configured on the server")
-    if not secrets.compare_digest(x_admin_token, config.ADMIN_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid developer access token")
 
 
 _STATUS_RE = re.compile(r"failed with (\d+)")
@@ -161,12 +147,13 @@ def selfcheck() -> dict:
             client.complete_text("Reply with one word.", "ping", config.MODEL_PARSE, max_tokens=1)
             llm_ping = {"status": "ok", "model": config.MODEL_PARSE}
         except LLMError as exc:
-            # Never forward the raw upstream response text here -- this
-            # route has no auth, so it's the most exposed of the three
-            # sites carrying this exact risk (see require_admin's sibling
-            # /admin/settings/test for the fuller explanation). The full
-            # exception (llm.py already truncates it) still reaches the
-            # operator via logger.error at the LLMError raise site itself.
+            # Never forward the raw upstream response text here -- an
+            # LLMError's message can carry the full raw provider response
+            # body (see llm.py's _chat()), and this is a real third-party
+            # secret's blast radius, unrelated to whether this route (or
+            # /admin/settings/test) has an access gate. The full exception
+            # (llm.py already truncates it) still reaches the operator via
+            # logger.error at the LLMError raise site itself.
             llm_ping = {"status": "error", "model": config.MODEL_PARSE, "detail": "error contacting provider"}
 
     ok = parse_cache["writable"] and llm_ping["status"] != "error"
@@ -206,7 +193,7 @@ def _mask_key(key: Optional[str]) -> Optional[str]:
 
 
 @router.get("/admin/settings")
-def get_admin_settings(_: None = Depends(require_admin)) -> dict:
+def get_admin_settings() -> dict:
     return {
         "llm_api_key_masked": _mask_key(config.LLM_API_KEY),
         "llm_base_url": config.LLM_BASE_URL,
@@ -220,7 +207,7 @@ def get_admin_settings(_: None = Depends(require_admin)) -> dict:
 
 
 @router.post("/admin/settings")
-def update_admin_settings(payload: AdminSettingsUpdate, _: None = Depends(require_admin)) -> dict:
+def update_admin_settings(payload: AdminSettingsUpdate) -> dict:
     # Mutates app.config's attributes directly (read via live `config.X`
     # access everywhere -- llm.py, orchestrator.py, parser.py -- never
     # `from app.config import X`), so every call site picks this up
@@ -259,7 +246,7 @@ def update_admin_settings(payload: AdminSettingsUpdate, _: None = Depends(requir
 
 
 @router.post("/admin/settings/test")
-def test_admin_settings(_: None = Depends(require_admin)) -> dict:
+def test_admin_settings() -> dict:
     """Runs the same probe /selfcheck does, against whatever config is
     currently active, so a just-saved key/model can be verified immediately.
     Deliberately broad except: classifies auth/rate-limit/network/any other
@@ -272,31 +259,6 @@ def test_admin_settings(_: None = Depends(require_admin)) -> dict:
     except Exception as exc:
         logger.exception("Developer Options: settings test probe failed")
         return {"status": _classify_llm_error(exc), "model": config.MODEL_PARSE}
-
-
-MIN_ADMIN_TOKEN_LENGTH = 8
-
-
-class AdminTokenRotate(BaseModel):
-    new_token: str
-
-
-@router.post("/admin/token")
-def rotate_admin_token(payload: AdminTokenRotate, _: None = Depends(require_admin)) -> dict:
-    """Lets an already-authenticated operator change the developer access
-    token without touching Railway -- requires knowing the current token
-    (require_admin), never the reverse. Same in-memory-only caveat as every
-    other Developer Options setting: this takes effect immediately, but a
-    Railway redeploy reverts to whatever ADMIN_TOKEN is set to there, so a
-    permanent change still needs the env var updated too."""
-    new_token = payload.new_token.strip()
-    if len(new_token) < MIN_ADMIN_TOKEN_LENGTH:
-        raise HTTPException(
-            status_code=400, detail=f"Token must be at least {MIN_ADMIN_TOKEN_LENGTH} characters"
-        )
-    config.ADMIN_TOKEN = new_token
-    logger.info("Developer Options: admin access token was rotated")  # never logs the value
-    return {"status": "updated"}
 
 
 @router.post("/upload")

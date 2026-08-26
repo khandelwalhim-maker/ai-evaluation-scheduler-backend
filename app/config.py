@@ -37,15 +37,3 @@ if not LLM_API_KEY:
         "LLM_API_KEY is not set. LLM-backed features (document parsing, chat "
         "intent, narration) will fail until it is configured in the environment."
     )
-
-# Gates the Developer Options admin endpoints (app/main.py's require_admin).
-# Unset by default -- fails closed, not open: with no token configured,
-# every /api/admin/* route responds 503 rather than being reachable with
-# an empty/guessable credential.
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
-
-if not ADMIN_TOKEN:
-    logger.warning(
-        "ADMIN_TOKEN is not set. Developer Options (/api/admin/*) is disabled "
-        "until it is configured in the environment."
-    )
