@@ -56,10 +56,12 @@ def test_week13_banner_confidence_and_tbc():
     tbc = [e for e in by_date["2026-08-25"].entries if e.raw_label == "BB-MGP-tbc"]
     assert tbc, "expected the BB-MGP-tbc cell on 2026-08-25"
     assert all(e.course_guess == "BB" and e.session_numbers == [] and e.entry_kind.value == "class" for e in tbc)
+    assert all(e.course_code == "BB" for e in tbc), "course_code must be set at parse time, same as course_guess"
 
     sim_lab = [e for e in by_date["2026-08-24"].entries if "SDT-SR-10" in e.raw_label]
     assert sim_lab, "expected the SDT-SR-10 sim-lab cell on 2026-08-24"
     assert all(e.course_guess == "SDT" and e.session_numbers == [10] for e in sim_lab)
+    assert all(e.course_code == e.course_guess for e in sim_lab)
 
 
 def test_multi_session_cell_parsing():

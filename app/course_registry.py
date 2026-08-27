@@ -7,7 +7,7 @@ from typing import Literal
 
 from openpyxl import Workbook, load_workbook
 
-_HEADER = ("abbreviation", "course_name")
+_HEADER = ("abbreviation", "course_name", "specialization")
 MAX_UPLOAD_BYTES = 1 * 1024 * 1024
 MAX_ROWS = 500
 
@@ -49,17 +49,31 @@ def _rows_from_xlsx(body: bytes) -> list[list[str]]:
     return [["" if cell is None else str(cell) for cell in row] for row in sheet.iter_rows(values_only=True)]
 
 
-def parse_registry_upload(body: bytes, filename: str) -> tuple[dict[str, str], list[str]]:
-    """Parses an uploaded course-registry CSV/XLSX into an ABBR -> name dict.
+def parse_registry_upload(
+    body: bytes, filename: str
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Parses an uploaded course-registry CSV/XLSX into an ABBR -> name dict,
+    plus a separate ABBR -> specialization dict from the optional 3rd column.
 
-    Returns (registry, collapsed_keys): collapsed_keys names any normalized
-    abbreviation that appeared more than once in the upload (last row wins),
-    so the caller can report exactly what happened rather than a bare count.
+    Returns (registry, specializations, collapsed_keys): collapsed_keys names
+    any normalized abbreviation that appeared more than once in the upload
+    (last row wins), so the caller can report exactly what happened rather
+    than a bare count.
 
     Row 0 is always treated as a header and skipped. Any other row is only
-    counted if BOTH columns are non-blank -- this is also what safely skips
-    a template's blank-abbreviation "known course names" reference rows
-    without needing a separate marker to detect.
+    counted if BOTH the abbreviation and name columns are non-blank -- this is
+    also what safely skips a template's blank-abbreviation "known course
+    names" reference rows without needing a separate marker to detect. The
+    3rd (specialization) column is optional on both counts: old 2-column
+    files (saved before this column existed) parse the same as before, and a
+    row with the first two columns filled but a blank 3rd column is simply
+    omitted from `specializations` -- NOT recorded as an explicit clear --
+    so that re-uploading a partially-filled template can never wipe out a
+    specialization the user already set one-at-a-time via the single-entry
+    UI (upsert_course_registry_entry, in main.py, is the opposite: a blank
+    specialization there is a deliberate, explicit clear, since a UI dropdown
+    always resubmits its full current value -- the two behaviors are
+    intentionally asymmetric, not a bug).
     """
     if len(body) > MAX_UPLOAD_BYTES:
         raise CourseRegistryFormatError("File exceeds the 1 MB course registry upload limit")
@@ -75,15 +89,19 @@ def parse_registry_upload(body: bytes, filename: str) -> tuple[dict[str, str], l
     data_rows = rows[1:][:MAX_ROWS]
 
     registry: dict[str, str] = {}
+    specializations: dict[str, str] = {}
     seen_count: dict[str, int] = {}
     for row in data_rows:
         abbr = (row[0] if len(row) > 0 else "").strip()
         name = (row[1] if len(row) > 1 else "").strip()
+        specialization = (row[2] if len(row) > 2 else "").strip()
         if not abbr or not name:
             continue
         key = normalize_abbreviation(abbr)
         seen_count[key] = seen_count.get(key, 0) + 1
         registry[key] = name  # last occurrence wins, matches the upsert rule in main.py
+        if specialization:
+            specializations[key] = specialization
 
     if not registry:
         raise CourseRegistryFormatError(
@@ -91,11 +109,14 @@ def parse_registry_upload(body: bytes, filename: str) -> tuple[dict[str, str], l
         )
 
     collapsed_keys = sorted(k for k, count in seen_count.items() if count > 1)
-    return registry, collapsed_keys
+    return registry, specializations, collapsed_keys
 
 
-def _example_rows() -> list[tuple[str, str]]:
-    return [("EAB", "Economic Analysis for Business"), ("ABA", "Applied Business Analytics")]
+def _example_rows() -> list[tuple[str, str, str]]:
+    return [
+        ("EAB", "Economic Analysis for Business", ""),
+        ("ABA", "Applied Business Analytics", ""),
+    ]
 
 
 def build_registry_template(
@@ -114,10 +135,13 @@ def build_registry_template(
     example rows when nothing is unresolved yet (fresh session, no
     timetable uploaded). `known_course_names` is listed separately, purely
     as a spelling reference -- never auto-paired with a code, since that
-    pairing isn't known anywhere in the system.
+    pairing isn't known anywhere in the system. The 3rd (specialization)
+    column is always left blank to fill in -- unlike course names, there is
+    no candidate value to prefill it with (it never appears in the
+    timetable's own text the way a course_guess code does).
     """
-    primary_rows: list[tuple[str, str]] = (
-        [(code, "") for code in sorted(unresolved_codes)] if unresolved_codes else _example_rows()
+    primary_rows: list[tuple[str, str, str]] = (
+        [(code, "", "") for code in sorted(unresolved_codes)] if unresolved_codes else _example_rows()
     )
 
     if fmt == "csv":
@@ -126,12 +150,12 @@ def build_registry_template(
         writer.writerow(_HEADER)
         writer.writerows(primary_rows)
         if known_course_names:
-            writer.writerow(["", ""])
+            writer.writerow(["", "", ""])
             writer.writerow(
-                ["", "--- Known course names (for reference; copy the spelling into a row above) ---"]
+                ["", "--- Known course names (for reference; copy the spelling into a row above) ---", ""]
             )
             for name in sorted(known_course_names):
-                writer.writerow(["", name])
+                writer.writerow(["", name, ""])
         return buf.getvalue().encode("utf-8"), "course_registry_template.csv", "text/csv"
 
     workbook = Workbook()

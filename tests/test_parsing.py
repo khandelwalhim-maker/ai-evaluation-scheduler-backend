@@ -148,6 +148,19 @@ def test_parse_timetable_with_registry_resolves_identity_questions():
         "names; got: " + repr(resolved_names)
     )
 
+    resolved_entries = [
+        entry
+        for day in parsed.days
+        for entry in day.entries
+        if entry.course_guess in registry.values()
+    ]
+    assert resolved_entries, "expected at least one resolved entry to check course_code against"
+    assert all(entry.course_code in registry for entry in resolved_entries), (
+        "course_code must keep the original raw code (EAB/ABA) even after registry "
+        "resolution overwrites course_guess to the canonical name -- it is the stable "
+        "join key course_specializations lookups depend on"
+    )
+
 
 def test_parse_timetable_registry_does_not_suppress_unrelated_questions():
     # A registry entry for an unrelated code must not accidentally suppress

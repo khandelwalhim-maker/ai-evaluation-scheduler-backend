@@ -196,6 +196,14 @@ def _parse_row_cells(
                 cohort_kind=cohort_kind,
                 cohort_id=cohort_id,
                 course_guess=parsed.course_guess,
+                # Same value as course_guess at creation time, but never
+                # mutated afterward -- see the field's docstring in
+                # schemas.py. _LEADING_CODE_RE only matches [A-Z][A-Z&]+, so
+                # this is always already upper-case with no whitespace; no
+                # extra normalization needed here, but the invariant is
+                # documented (not just assumed) since course_specializations
+                # lookups depend on it.
+                course_code=parsed.course_guess,
                 session_numbers=parsed.session_numbers,
                 start=start,
                 end=end,

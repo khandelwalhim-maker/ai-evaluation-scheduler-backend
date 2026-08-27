@@ -364,13 +364,20 @@ async def upload_course_registry(
 ):
     body = await file.read()
     try:
-        new_registry, collapsed_keys = course_registry.parse_registry_upload(body, file.filename or "")
+        new_registry, new_specializations, collapsed_keys = course_registry.parse_registry_upload(
+            body, file.filename or ""
+        )
     except CourseRegistryFormatError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Upsert, last-write-wins: a re-upload that corrects an existing
     # abbreviation is expected to take effect, not be ignored.
     session.calendar.course_registry.update(new_registry)
+    # A blank specialization cell is omitted from new_specializations entirely
+    # (see parse_registry_upload's docstring), so .update() here can never
+    # clear an existing specialization the user set one-at-a-time -- only a
+    # non-blank cell overwrites.
+    session.calendar.course_specializations.update(new_specializations)
     session.bump()
 
     summary: dict = {"added_or_updated": len(new_registry)}
@@ -405,12 +412,22 @@ def download_course_registry_template(format: str = "csv", session: SessionState
 @router.delete("/course-registry")
 def clear_course_registry(session: SessionState = Depends(require_session)):
     session.calendar.course_registry = {}
+    session.calendar.course_specializations = {}
     session.bump()
     return {"status": "cleared", "state_version": session.state_version}
 
 
 class RegistryEntryUpsert(BaseModel):
     course_name: str
+    # Optional minor specialization tag (one of session.calendar.cohorts.minors,
+    # picked from a dropdown on the frontend -- never a division letter, since
+    # a core course genuinely runs across all divisions at once and has no
+    # single division value to store). Blank or omitted both clear any
+    # existing tag: unlike the bulk upload path (course_registry.py), a UI
+    # dropdown always resubmits its full current value, so there is no
+    # separate "leave unchanged" state to preserve here -- this is the
+    # intentional opposite of parse_registry_upload's blank-means-omit rule.
+    specialization: Optional[str] = None
 
 
 @router.put("/course-registry/{abbreviation}")
@@ -427,6 +444,13 @@ def upsert_course_registry_entry(
     if not key:
         raise HTTPException(status_code=400, detail="abbreviation must not be blank")
     session.calendar.course_registry[key] = name
+
+    specialization = (payload.specialization or "").strip()
+    if specialization:
+        session.calendar.course_specializations[key] = specialization
+    else:
+        session.calendar.course_specializations.pop(key, None)
+
     session.bump()
     return {"status": "updated", "abbreviation": key, "state_version": session.state_version}
 
@@ -437,6 +461,9 @@ def remove_course_registry_entry(abbreviation: str, session: SessionState = Depe
     if key not in session.calendar.course_registry:
         raise HTTPException(status_code=404, detail=f"No registry entry for '{key}'")
     del session.calendar.course_registry[key]
+    # Same normalized key as the course_registry deletion above -- no
+    # orphaned specialization tag should survive removing its abbreviation.
+    session.calendar.course_specializations.pop(key, None)
     session.bump()
     return {"status": "removed", "abbreviation": key, "state_version": session.state_version}
 
@@ -494,6 +521,7 @@ def get_grid(week_start: str, session: SessionState = Depends(require_session)):
                 shaped = {
                     "raw_label": entry.raw_label,
                     "course": entry.course_guess,
+                    "course_code": entry.course_code,
                     "cohort_kind": entry.cohort_kind.value,
                     "cohort_id": entry.cohort_id,
                     "session_numbers": entry.session_numbers,

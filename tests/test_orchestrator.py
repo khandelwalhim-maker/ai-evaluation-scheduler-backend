@@ -47,7 +47,7 @@ session.
 from __future__ import annotations
 
 from app import engine
-from app.orchestrator import IntentFields, IntentResult, _build_context, handle_message
+from app.orchestrator import IntentFields, IntentResult, _build_context, handle_message, resolve_confirmation
 from app.schemas import (
     CalendarState,
     CohortKind,
@@ -272,3 +272,36 @@ def test_restore_round_trips_serialize_output():
     assert restored.state_version == session.state_version
     assert restored.serialize() == blob
     assert engine._PROPOSALS.get(proposal.id) is not None
+
+
+def test_resolve_confirmation_mutates_course_guess_but_not_course_code():
+    # resolve_confirmation is the second of two independent places that
+    # overwrite course_guess in place once identity resolves (the other is
+    # parser.py's _confirmation_questions, covered in test_parsing.py) --
+    # this is the chat/manual-confirm path (shared by /api/confirm and the
+    # answer_confirmation chat action), not the course-registry path. Either
+    # way, course_code must stay exactly what the parser originally set.
+    session = SessionState(calendar=CalendarState(), session_id="office")
+    entry = TimetableEntry(
+        raw_label="EAB-JR-14",
+        row_label="Core",
+        cohort_kind=CohortKind.division,
+        cohort_id="A",
+        course_guess="EAB",
+        course_code="EAB",
+        session_numbers=[14],
+        entry_kind=EntryKind.class_,
+        confidence=0.5,
+    )
+    session.calendar.dates["2026-08-24"] = TimetableDay(date="2026-08-24", entries=[entry])
+    session.confirmation_queue.append(
+        ConfirmationQuestion(kind="identity", question="Is EAB the same as ABA?", context="EAB")
+    )
+
+    message = resolve_confirmation(session, context="EAB", resolution="Economic Analysis for Business")
+
+    assert "1 entries updated" in message
+    assert entry.course_guess == "Economic Analysis for Business"
+    assert entry.course_code == "EAB", "course_code must not be touched by the chat/manual confirm path either"
+    assert entry.confidence == 1.0
+    assert session.confirmation_queue == []

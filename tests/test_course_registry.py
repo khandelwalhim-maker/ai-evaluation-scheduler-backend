@@ -19,9 +19,10 @@ def _seed_session(client: TestClient) -> None:
 
 def test_parse_registry_upload_csv_basic():
     body = b"abbreviation,course_name\nEAB,Economic Analysis for Business\nABA,Applied Business Analytics\n"
-    registry, collapsed = parse_registry_upload(body, "template.csv")
+    registry, specializations, collapsed = parse_registry_upload(body, "template.csv")
 
     assert registry == {"EAB": "Economic Analysis for Business", "ABA": "Applied Business Analytics"}
+    assert specializations == {}
     assert collapsed == []
 
 
@@ -34,9 +35,10 @@ def test_parse_registry_upload_skips_blank_and_partial_rows():
         b",\n"
         b",Financial Management\n"
     )
-    registry, collapsed = parse_registry_upload(body, "template.csv")
+    registry, specializations, collapsed = parse_registry_upload(body, "template.csv")
 
     assert registry == {"EAB": "Economic Analysis for Business"}
+    assert specializations == {}
     assert collapsed == []
 
 
@@ -46,10 +48,39 @@ def test_parse_registry_upload_case_collision_last_write_wins():
         b"eab,Wrong Name\n"
         b"EAB,Economic Analysis for Business\n"
     )
-    registry, collapsed = parse_registry_upload(body, "template.csv")
+    registry, specializations, collapsed = parse_registry_upload(body, "template.csv")
 
     assert registry == {"EAB": "Economic Analysis for Business"}, "last occurrence should win"
     assert collapsed == ["EAB"], "should name the colliding key, not just count it"
+
+
+def test_parse_registry_upload_backward_compatible_with_old_two_column_csv():
+    # Files saved before the specialization column existed must still parse.
+    body = b"abbreviation,course_name\nEAB,Economic Analysis for Business\n"
+    registry, specializations, collapsed = parse_registry_upload(body, "old_template.csv")
+
+    assert registry == {"EAB": "Economic Analysis for Business"}
+    assert specializations == {}
+    assert collapsed == []
+
+
+def test_parse_registry_upload_reads_specialization_column():
+    body = (
+        b"abbreviation,course_name,specialization\n"
+        b"OSCSD,Operations Elective,Operations and Supply Chain\n"
+        b"EAB,Economic Analysis for Business,\n"
+    )
+    registry, specializations, collapsed = parse_registry_upload(body, "template.csv")
+
+    assert registry == {
+        "OSCSD": "Operations Elective",
+        "EAB": "Economic Analysis for Business",
+    }
+    # A blank specialization cell is omitted entirely, not recorded as "" --
+    # see parse_registry_upload's docstring on why this must not be treated
+    # as an explicit clear during a bulk (possibly partial) re-upload.
+    assert specializations == {"OSCSD": "Operations and Supply Chain"}
+    assert collapsed == []
 
 
 def test_parse_registry_upload_rejects_unknown_extension():
@@ -116,8 +147,29 @@ def test_build_registry_template_xlsx_round_trips_through_parse():
     out = io.BytesIO()
     workbook.save(out)
 
-    registry, collapsed = parse_registry_upload(out.getvalue(), "filled.xlsx")
+    registry, specializations, collapsed = parse_registry_upload(out.getvalue(), "filled.xlsx")
     assert registry == {"EAB": "Economic Analysis for Business"}
+    assert specializations == {}, "leaving column C blank must not invent a specialization"
+    assert collapsed == []
+
+
+def test_build_registry_template_xlsx_round_trips_specialization_column():
+    from openpyxl import load_workbook
+    import io
+
+    content, _, _ = build_registry_template(
+        unresolved_codes=["OSCSD"], known_course_names=[], fmt="xlsx"
+    )
+    workbook = load_workbook(io.BytesIO(content))
+    sheet = workbook["Course Registry"]
+    sheet["B2"] = "Operations Elective"
+    sheet["C2"] = "Operations and Supply Chain"
+    out = io.BytesIO()
+    workbook.save(out)
+
+    registry, specializations, collapsed = parse_registry_upload(out.getvalue(), "filled.xlsx")
+    assert registry == {"OSCSD": "Operations Elective"}
+    assert specializations == {"OSCSD": "Operations and Supply Chain"}
     assert collapsed == []
 
 
@@ -169,3 +221,135 @@ def test_remove_registry_entry_missing_404s():
 
     resp = client.delete("/api/course-registry/NOPE", headers=HEADERS)
     assert resp.status_code == 404
+
+
+def test_upsert_registry_entry_sets_and_clears_specialization():
+    client = TestClient(app)
+    _seed_session(client)
+
+    add = client.put(
+        "/api/course-registry/OSCSD",
+        json={"course_name": "Operations Elective", "specialization": "Operations and Supply Chain"},
+        headers=HEADERS,
+    )
+    assert add.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_specializations"] == {"OSCSD": "Operations and Supply Chain"}
+
+    # Blank specialization on a re-submit is an explicit clear (the opposite
+    # of the bulk-upload path below) -- a UI dropdown always resubmits its
+    # full current value, so there is no separate "leave unchanged" state.
+    cleared = client.put(
+        "/api/course-registry/OSCSD",
+        json={"course_name": "Operations Elective", "specialization": ""},
+        headers=HEADERS,
+    )
+    assert cleared.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_specializations"] == {}
+    assert state["calendar"]["course_registry"] == {"OSCSD": "Operations Elective"}, (
+        "clearing the specialization must not touch the course name"
+    )
+
+
+def test_upsert_registry_entry_specialization_normalizes_key_case_insensitively():
+    # A lower-case abbreviation entered through the UI must join the same
+    # normalized key ("SDT") that a parsed TimetableEntry.course_code always
+    # uses (course_code is extracted via an all-caps-only regex, so it is
+    # never lower-case) -- this is the registry side of that normalization
+    # contract.
+    client = TestClient(app)
+    _seed_session(client)
+
+    resp = client.put(
+        "/api/course-registry/sdt",
+        json={"course_name": "Strategic Decision Tools", "specialization": "Marketing"},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_specializations"] == {"SDT": "Marketing"}
+
+
+def test_remove_registry_entry_also_removes_specialization():
+    client = TestClient(app)
+    _seed_session(client)
+    client.put(
+        "/api/course-registry/EAB",
+        json={"course_name": "Economic Analysis", "specialization": "Finance"},
+        headers=HEADERS,
+    )
+
+    resp = client.delete("/api/course-registry/eab", headers=HEADERS)
+    assert resp.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_registry"] == {}
+    assert state["calendar"]["course_specializations"] == {}, "must not leave an orphaned tag behind"
+
+
+def test_clear_registry_also_clears_specializations():
+    client = TestClient(app)
+    _seed_session(client)
+    client.put(
+        "/api/course-registry/EAB",
+        json={"course_name": "Economic Analysis", "specialization": "Finance"},
+        headers=HEADERS,
+    )
+
+    resp = client.delete("/api/course-registry", headers=HEADERS)
+    assert resp.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_registry"] == {}
+    assert state["calendar"]["course_specializations"] == {}
+
+
+def test_bulk_upload_blank_specialization_does_not_clear_existing_tag():
+    client = TestClient(app)
+    _seed_session(client)
+    client.put(
+        "/api/course-registry/EAB",
+        json={"course_name": "Economic Analysis", "specialization": "Finance"},
+        headers=HEADERS,
+    )
+
+    body = b"abbreviation,course_name,specialization\nEAB,Economic Analysis for Business,\n"
+    resp = client.post(
+        "/api/course-registry",
+        files={"file": ("update.csv", body, "text/csv")},
+        headers=HEADERS,
+    )
+    assert resp.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_registry"] == {"EAB": "Economic Analysis for Business"}, (
+        "the name column should still update"
+    )
+    assert state["calendar"]["course_specializations"] == {"EAB": "Finance"}, (
+        "a blank specialization cell on a bulk re-upload must leave an existing tag untouched"
+    )
+
+
+def test_course_specialization_survives_state_restore():
+    client = TestClient(app)
+    _seed_session(client)
+    client.put(
+        "/api/course-registry/EAB",
+        json={"course_name": "Economic Analysis", "specialization": "Finance"},
+        headers=HEADERS,
+    )
+
+    exported = client.get("/api/export", headers=HEADERS).json()
+    assert exported["calendar"]["course_specializations"] == {"EAB": "Finance"}
+
+    restore = client.post("/api/state/restore", json=exported, headers=HEADERS)
+    assert restore.status_code == 200
+
+    state = client.get("/api/state", headers=HEADERS).json()
+    assert state["calendar"]["course_specializations"] == {"EAB": "Finance"}, (
+        "must survive a full serialize/restore round trip, not just an in-memory update"
+    )

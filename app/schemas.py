@@ -95,6 +95,13 @@ class TimetableEntry(BaseModel):
     cohort_kind: CohortKind
     cohort_id: Optional[str] = None
     course_guess: Optional[str] = None
+    # Set once at parse time to the same value as course_guess, then never
+    # mutated again -- unlike course_guess, which _confirmation_questions
+    # (parser.py) and resolve_confirmation (orchestrator.py) both overwrite in
+    # place once identity resolves. Anything that needs to key off "the
+    # original code" regardless of resolution state (course_specializations
+    # lookups) must join on this field, not course_guess.
+    course_code: Optional[str] = None
     session_numbers: list[int] = Field(default_factory=list)
     start: Optional[int] = None
     end: Optional[int] = None
@@ -177,3 +184,12 @@ class CalendarState(BaseModel):
     # downloadable CSV/XLSX template. Consulted by parser._confirmation_questions
     # to resolve timetable course_guess codes without a manual confirmation.
     course_registry: dict[str, str] = Field(default_factory=dict)
+    # User-supplied ABBR -> minor specialization name (one of cohorts.minors),
+    # keyed identically to course_registry (course_registry.normalize_abbreviation).
+    # Kept as a separate dict rather than widening course_registry's value type,
+    # since parser.py's `set(registry.values())` requires those values stay
+    # hashable strings. Purely descriptive/display metadata -- never consulted
+    # by parsing or scheduling logic. Absent key means "core" (not yet tagged,
+    # or a core course that runs across all divisions and has no single
+    # specialization value to store).
+    course_specializations: dict[str, str] = Field(default_factory=dict)
